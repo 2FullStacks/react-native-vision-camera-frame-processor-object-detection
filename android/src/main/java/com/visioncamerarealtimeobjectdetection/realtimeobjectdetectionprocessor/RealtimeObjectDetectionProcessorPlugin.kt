@@ -1,135 +1,87 @@
 package com.visioncamerarealtimeobjectdetection.realtimeobjectdetectionprocessor
 
-import kotlin.math.max
-import android.graphics.Matrix
-import android.graphics.RectF
-import androidx.camera.core.ImageProxy
 import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.ReadableMap
-import com.facebook.react.bridge.WritableNativeArray
-import com.facebook.react.bridge.WritableNativeMap
-import com.google.android.odml.image.MediaMlImageBuilder
-import com.mrousavy.camera.frameprocessor.FrameProcessorPlugin
-import org.tensorflow.lite.task.core.BaseOptions
-import org.tensorflow.lite.task.vision.detector.ObjectDetector
 
-class RealtimeObjectDetectionProcessorPlugin(reactContext: ReactApplicationContext) :
-    FrameProcessorPlugin("detectObjects") {
-    private val _context: ReactApplicationContext = reactContext
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.tasks.components.containers.Detection
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
+
+import com.mrousavy.camera.frameprocessors.Frame
+import com.mrousavy.camera.frameprocessors.VisionCameraProxy
+import com.mrousavy.camera.frameprocessors.FrameProcessorPlugin
+
+class RealtimeObjectDetectionProcessorPlugin(proxy: VisionCameraProxy, options: Map<String, Any>?): FrameProcessorPlugin() {
+    private val _context: ReactApplicationContext = proxy.context
     private var _detector: ObjectDetector? = null
 
-    fun rotateRect(rect: RectF, degrees: Int): RectF {
-        val matrix = Matrix()
-        matrix.postRotate(degrees.toFloat(), rect.centerX(), rect.centerY())
-        val rotatedRect = RectF(rect)
-        matrix.mapRect(rotatedRect)
-        return rotatedRect
-    }
-
-    fun getDetectorWithModelFile(config: ReadableMap): ObjectDetector {
+    fun getDetectorWithModelFile(config: Map<String, Any>): ObjectDetector {
         if (_detector == null) {
-            val modelFile = config.getString("modelFile")
+            val modelFile = config["modelFile"].toString()
 
-            val scoreThreshold = config.getDouble("scoreThreshold").toFloat()
-            val maxResults = config.getInt("maxResults")
-            val numThreads = config.getInt("numThreads")
+            val maxResults = (config["maxResults"] as? Number)?.toInt()
+            val scoreThreshold = (config["scoreThreshold"] as? Number)?.toFloat()
 
-            val baseOptionsBuilder = BaseOptions.builder().setNumThreads(numThreads)
+            val optionsBuilder = ObjectDetector.ObjectDetectorOptions.builder()
+                .setBaseOptions(BaseOptions.builder().setModelAssetPath(modelFile).build())
+                .setRunningMode(RunningMode.IMAGE)
+                .setMaxResults(maxResults)
 
-            val optionsBuilder =
-                ObjectDetector.ObjectDetectorOptions.builder()
-                    .setBaseOptions(baseOptionsBuilder.build())
-                    .setScoreThreshold(scoreThreshold)
-                    .setMaxResults(maxResults)
+            if (scoreThreshold != null && scoreThreshold > 0) {
+                optionsBuilder.setScoreThreshold(scoreThreshold)
+            }
 
-            _detector =
-                ObjectDetector.createFromFileAndOptions(
-                    _context,
-                    "custom/$modelFile",
-                    optionsBuilder.build()
-                )
+            val options = optionsBuilder.build()
+
+            _detector = ObjectDetector.createFromOptions(_context, options);
         }
         return _detector!!
     }
 
-    override fun callback(frame: ImageProxy, params: Array<Any>): WritableNativeArray {
+    fun convertToConfigWithDefault(input: Map<String, Any>?): Map<String, Any> {
+        return input ?: emptyMap()
+    }
+
+    override fun callback(frame: Frame, arguments: Map<String, Any>?): Any? {
         val mediaImage = frame.image
 
+        val results: MutableList<Any> = arrayListOf()
+
         if (mediaImage == null) {
-            return WritableNativeArray()
+            return results
         }
 
-        val config = params[0] as ReadableMap
+        val config = convertToConfigWithDefault(arguments)
 
-        val mlImage = MediaMlImageBuilder(mediaImage).build()
+        val bitmap = frame.getImageProxy().toBitmap()
+        val mlImage = BitmapImageBuilder(bitmap).build()
 
-        val frameWidth = mlImage.width
-        val frameHeight = mlImage.height
+        val detectedObjects = getDetectorWithModelFile(config).detect(mlImage)?.detections()
 
-        // val ratio = max(mlImage.width.toFloat() / frameWidth, mlImage.height.toFloat() / frameHeight)
+        detectedObjects?.forEach { detectedObject ->
+            val labels: MutableList<Any> = arrayListOf()
 
-        val results = WritableNativeArray()
-        val detectedObjects = getDetectorWithModelFile(config).detect(mlImage)
-
-        for (detectedObject in detectedObjects) {
-            val labels = WritableNativeArray()
-
-            for (label in detectedObject.categories) {
-                val labelMap = WritableNativeMap()
-
-                labelMap.putInt("index", label.index)
-                labelMap.putString("label", label.label)
-                labelMap.putDouble("confidence", label.score.toDouble())
-
-                labels.pushMap(labelMap)
+            detectedObject.categories().forEach { label ->
+                labels.add(mapOf(
+                    "index" to label.index(),
+                    "label" to label.categoryName(),
+                    "confidence" to label.score().toDouble()
+                ))
             }
 
-            if (labels.size() > 0) {
-                val objectMap = WritableNativeMap()
-
-                objectMap.putArray("labels", labels)
-
-                val top = when (frame.imageInfo.rotationDegrees) {
-                    90 -> detectedObject.boundingBox.left / frameWidth
-                    180 -> (frameHeight - detectedObject.boundingBox.bottom) / frameHeight
-                    270 -> (frameWidth - detectedObject.boundingBox.right) / frameWidth
-                    else -> detectedObject.boundingBox.top / frameHeight
-                }
-
-                val height = when (frame.imageInfo.rotationDegrees) {
-                    90 -> (detectedObject.boundingBox.right - detectedObject.boundingBox.left) / frameWidth
-                    180 -> (detectedObject.boundingBox.bottom - detectedObject.boundingBox.top) / frameHeight
-                    270 -> (detectedObject.boundingBox.right - detectedObject.boundingBox.left) / frameWidth
-                    else -> (detectedObject.boundingBox.bottom - detectedObject.boundingBox.top) / frameHeight
-                }
-
-                val left = when (frame.imageInfo.rotationDegrees) {
-                    90 -> (frameHeight - detectedObject.boundingBox.bottom) / frameHeight
-                    180 -> (frameWidth - detectedObject.boundingBox.right) / frameWidth
-                    270 -> detectedObject.boundingBox.top / frameHeight
-                    else -> detectedObject.boundingBox.left / frameWidth
-                }
-
-                val width = when (frame.imageInfo.rotationDegrees) {
-                    90 -> (detectedObject.boundingBox.bottom - detectedObject.boundingBox.top) / frameHeight
-                    180 -> (detectedObject.boundingBox.right - detectedObject.boundingBox.left) / frameWidth
-                    270 -> (detectedObject.boundingBox.bottom - detectedObject.boundingBox.top) / frameHeight
-                    else -> (detectedObject.boundingBox.right - detectedObject.boundingBox.left) / frameWidth
-                }
-
-                println("abcde: ${top} ${left} ${width} ${height}")
-                println("xxxxx: ${mediaImage.width} ${mediaImage.height}")
-                println("xxxxx: ${frame.imageInfo.rotationDegrees}")
-
-                objectMap.putDouble("top", top.toDouble())
-                objectMap.putDouble("left", left.toDouble())
-                objectMap.putDouble("width", width.toDouble())
-                objectMap.putDouble("height", height.toDouble())
-
-                results.pushMap(objectMap)
+            if (labels.isNotEmpty()) {
+                results.add(mapOf(
+                    "labels" to labels,
+                    "top" to detectedObject.boundingBox().top.toDouble(),
+                    "left" to detectedObject.boundingBox().left.toDouble(),
+                    "width" to detectedObject.boundingBox().width().toDouble(),
+                    "height" to detectedObject.boundingBox().height().toDouble()
+                ))
             }
         }
 
         return results
     }
+
 }

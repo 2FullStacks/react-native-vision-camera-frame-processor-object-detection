@@ -14,7 +14,6 @@ export interface ObjectLabel {
 }
 
 export interface DetectedObject {
-  frameRotation: number;
   labels: ObjectLabel[];
 
   /**
